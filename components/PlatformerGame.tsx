@@ -982,12 +982,24 @@ export default function PlatformerGame() {
     };
 
     // ----- Loop -----
+    // Fixed-timestep accumulator so physics run at 60Hz regardless of
+    // the display's refresh rate (otherwise 120Hz monitors play 2x speed).
+    const FIXED_DT = 1 / 60;
     let last = performance.now();
+    let acc = 0;
     let raf = 0;
     const tick = (now: number) => {
-      const dt = Math.min(0.05, (now - last) / 1000);
+      const frameDt = Math.min(0.1, (now - last) / 1000);
       last = now;
-      update(dt);
+      acc += frameDt;
+      let steps = 0;
+      while (acc >= FIXED_DT && steps < 5) {
+        update(FIXED_DT);
+        acc -= FIXED_DT;
+        steps++;
+      }
+      // If we somehow fell way behind, drop the surplus to avoid spiral-of-death.
+      if (acc > FIXED_DT * 5) acc = 0;
       draw();
       raf = requestAnimationFrame(tick);
     };
