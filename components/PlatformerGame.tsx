@@ -1,5 +1,6 @@
 "use client";
 
+import type { FormEvent } from "react";
 import { useEffect, useRef, useState } from "react";
 
 type Vec = { x: number; y: number };
@@ -19,6 +20,31 @@ type Particle = {
   x: number; y: number; vx: number; vy: number;
   life: number; maxLife: number; color: string; size: number;
 };
+type Ship = {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  mastH: number;
+  bobPhase: number;
+  reload: number;
+  flashT: number;
+};
+type Cannonball = {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  r: number;
+  live: boolean;
+  trailT: number;
+};
+type LeaderboardEntry = {
+  id: string;
+  name: string;
+  score: number;
+  date: string;
+};
 
 const VIEW_W = 960;
 const VIEW_H = 540;
@@ -30,11 +56,114 @@ const JUMP_V = -11.6;
 const DOUBLE_JUMP_V = -10.2;
 const MAX_FALL = 16;
 const MAX_HSPEED = 5.4;
+const CANNONBALL_GRAVITY = 0.28;
+const BEST_SCORE_KEY = "neon-cove-best";
+const LEADERBOARD_KEY = "neon-cove-leaderboard";
+const LEADERBOARD_LIMIT = 8;
+
+function sortLeaderboard(entries: LeaderboardEntry[]) {
+  return [...entries]
+    .sort((a, b) => b.score - a.score || b.date.localeCompare(a.date) || a.name.localeCompare(b.name))
+    .slice(0, LEADERBOARD_LIMIT);
+}
+
+function readLeaderboard() {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = JSON.parse(window.localStorage.getItem(LEADERBOARD_KEY) || "[]");
+    if (!Array.isArray(raw)) return [];
+    const entries = raw
+      .map((entry): LeaderboardEntry | null => {
+        if (!entry || typeof entry !== "object") return null;
+        const name = typeof entry.name === "string" ? entry.name.trim().slice(0, 18) : "";
+        const score = typeof entry.score === "number" ? Math.floor(entry.score) : Number(entry.score);
+        const date = typeof entry.date === "string" ? entry.date : new Date(0).toISOString();
+        if (!name || !Number.isFinite(score) || score <= 0) return null;
+        return {
+          id: typeof entry.id === "string" && entry.id ? entry.id : `${date}-${name}`,
+          name,
+          score,
+          date,
+        };
+      })
+      .filter((entry): entry is LeaderboardEntry => entry !== null);
+    return sortLeaderboard(entries);
+  } catch {
+    return [];
+  }
+}
+
+function qualifiesForLeaderboard(score: number, entries: LeaderboardEntry[]) {
+  if (score <= 0) return false;
+  if (entries.length < LEADERBOARD_LIMIT) return true;
+  return score >= entries[entries.length - 1].score;
+}
+
+function sanitizePlayerName(name: string) {
+  const clean = name.replace(/\s+/g, " ").trim().slice(0, 18);
+  return clean || "Deckhand";
+}
 
 export default function PlatformerGame() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const nameInputRef = useRef<HTMLInputElement | null>(null);
+  const leaderboardRef = useRef<LeaderboardEntry[]>([]);
+  const bestScoreRef = useRef(0);
+  const pendingScoreRef = useRef<number | null>(null);
+  const needsNameEntryRef = useRef(false);
   const [hud, setHud] = useState({ score: 0, best: 0, state: "title" as "title" | "playing" | "dead" });
+  const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
+  const [pendingScore, setPendingScore] = useState<number | null>(null);
+  const [needsNameEntry, setNeedsNameEntry] = useState(false);
+  const [playerName, setPlayerName] = useState("");
+
+  const closeNameEntry = () => {
+    pendingScoreRef.current = null;
+    needsNameEntryRef.current = false;
+    setPendingScore(null);
+    setNeedsNameEntry(false);
+    setPlayerName("");
+  };
+
+  const openNameEntry = (score: number) => {
+    pendingScoreRef.current = score;
+    needsNameEntryRef.current = true;
+    setPendingScore(score);
+    setNeedsNameEntry(true);
+    setPlayerName("");
+  };
+
+  const submitLeaderboardEntry = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const score = pendingScoreRef.current;
+    if (score === null) return;
+
+    const entry: LeaderboardEntry = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      name: sanitizePlayerName(playerName),
+      score,
+      date: new Date().toISOString(),
+    };
+    const nextBoard = sortLeaderboard([...leaderboardRef.current, entry]);
+    const nextBest = Math.max(bestScoreRef.current, nextBoard[0]?.score ?? 0);
+
+    leaderboardRef.current = nextBoard;
+    bestScoreRef.current = nextBest;
+    window.localStorage.setItem(LEADERBOARD_KEY, JSON.stringify(nextBoard));
+    window.localStorage.setItem(BEST_SCORE_KEY, String(nextBest));
+
+    setLeaderboard(nextBoard);
+    setHud((current) => ({ ...current, best: nextBest }));
+    closeNameEntry();
+  };
+
+  useEffect(() => {
+    if (needsNameEntry) {
+      nameInputRef.current?.focus();
+      nameInputRef.current?.select();
+    }
+  }, [needsNameEntry]);
 
   useEffect(() => {
     const canvas = canvasRef.current!;
@@ -75,6 +204,7 @@ export default function PlatformerGame() {
       doubleJump: () => playTone(720, 0.16, "triangle", 0.06, 1200),
       stomp: () => { playTone(180, 0.08, "square", 0.07, 80); playTone(420, 0.1, "triangle", 0.05, 220); },
       coin: () => { playTone(880, 0.06, "triangle", 0.05); setTimeout(() => playTone(1320, 0.09, "triangle", 0.05), 50); },
+      cannon: () => { playTone(110, 0.16, "sawtooth", 0.06, 70); setTimeout(() => playTone(72, 0.24, "square", 0.04, 48), 40); },
       death: () => { playTone(440, 0.18, "sawtooth", 0.07, 110); setTimeout(() => playTone(220, 0.3, "sawtooth", 0.07, 60), 120); },
       start: () => { playTone(523, 0.08, "triangle", 0.05); setTimeout(() => playTone(659, 0.08, "triangle", 0.05), 80); setTimeout(() => playTone(880, 0.14, "triangle", 0.06), 160); },
     };
@@ -82,7 +212,14 @@ export default function PlatformerGame() {
     // ----- Game state -----
     type State = "title" | "playing" | "dead";
     let state: State = "title";
-    let bestScore = Number(localStorage.getItem("neon-cove-best") || "0");
+    const savedLeaderboard = readLeaderboard();
+    leaderboardRef.current = savedLeaderboard;
+    setLeaderboard(savedLeaderboard);
+    let bestScore = Math.max(
+      Number(window.localStorage.getItem(BEST_SCORE_KEY) || "0"),
+      savedLeaderboard[0]?.score ?? 0,
+    );
+    bestScoreRef.current = bestScore;
     setHud((h) => ({ ...h, best: bestScore }));
 
     const player = {
@@ -99,7 +236,10 @@ export default function PlatformerGame() {
     let platforms: Platform[] = [];
     let enemies: Enemy[] = [];
     let coins: Coin[] = [];
+    let ships: Ship[] = [];
+    let cannonballs: Cannonball[] = [];
     let particles: Particle[] = [];
+    let nextShipX = 620;
 
     let camX = 0;
     let furthestX = 0;
@@ -147,6 +287,19 @@ export default function PlatformerGame() {
       }
     };
 
+    const spawnShip = (x: number) => {
+      ships.push({
+        x,
+        y: GROUND_Y + rand(10, 22),
+        w: rand(76, 112),
+        h: rand(20, 28),
+        mastH: rand(28, 42),
+        bobPhase: Math.random() * Math.PI * 2,
+        reload: rand(1.2, 2.4),
+        flashT: 0,
+      });
+    };
+
     const generateNext = () => {
       let lastX = platforms.length ? platforms[platforms.length - 1].x + platforms[platforms.length - 1].w : 0;
       let lastY = platforms.length ? platforms[platforms.length - 1].y : GROUND_Y - 80;
@@ -170,13 +323,21 @@ export default function PlatformerGame() {
         lastX = p.x + p.w;
         lastY = p.y;
       }
+
+      while (nextShipX < targetX - 80) {
+        spawnShip(nextShipX + rand(-40, 55));
+        nextShipX += rand(360, 560);
+      }
     };
 
     const resetGame = () => {
       platforms = [];
       enemies = [];
       coins = [];
+      ships = [];
+      cannonballs = [];
       particles = [];
+      nextShipX = 620;
       camX = 0;
       furthestX = 0;
       score = 0;
@@ -206,10 +367,18 @@ export default function PlatformerGame() {
       player.jumps = 0;
       player.hurtT = 0;
       player.facing = 1;
+      closeNameEntry();
     };
 
     // ----- Input -----
     const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target;
+      if (
+        target instanceof HTMLElement &&
+        (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)
+      ) {
+        return;
+      }
       // Prevent page scroll on space/arrows
       if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " "].includes(e.key)) e.preventDefault();
       const k = e.key.toLowerCase();
@@ -250,6 +419,48 @@ export default function PlatformerGame() {
     const aabb = (a: Rect, b: Rect) =>
       a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
 
+    const isStompHit = (enemy: Enemy, prevBottom: number) => {
+      const playerBottom = player.y + player.h;
+      const overlapX = Math.min(player.x + player.w, enemy.x + enemy.w) - Math.max(player.x, enemy.x);
+      const overlapY = Math.min(playerBottom, enemy.y + enemy.h) - Math.max(player.y, enemy.y);
+      const cameFromAbove = prevBottom <= enemy.y + 8;
+      const landedOnTop = playerBottom <= enemy.y + enemy.h * 0.45;
+      const verticalHitDominates = overlapY <= overlapX + 2;
+      return player.vy > 0 && overlapX > 0 && overlapY > 0 && cameFromAbove && landedOnTop && verticalHitDominates;
+    };
+
+    const circleHitsRect = (cx: number, cy: number, r: number, rect: Rect) => {
+      const nearestX = Math.max(rect.x, Math.min(cx, rect.x + rect.w));
+      const nearestY = Math.max(rect.y, Math.min(cy, rect.y + rect.h));
+      const dx = cx - nearestX;
+      const dy = cy - nearestY;
+      return dx * dx + dy * dy <= r * r;
+    };
+
+    const fireShip = (ship: Ship) => {
+      const dx = player.x + player.w * 0.5 + player.vx * 16 - ship.x;
+      const frames = Math.max(34, Math.min(68, Math.abs(dx) / 4.2));
+      const muzzleX = ship.x + Math.sign(dx || 1) * ship.w * 0.28;
+      const muzzleY = ship.y - ship.h - 8;
+      const targetY = player.y + player.h * 0.45;
+      const vx = dx / frames;
+      const vy = (targetY - muzzleY - CANNONBALL_GRAVITY * frames * (frames + 1) * 0.5) / frames;
+
+      cannonballs.push({
+        x: muzzleX,
+        y: muzzleY,
+        vx,
+        vy,
+        r: rand(6, 8.5),
+        live: true,
+        trailT: 0,
+      });
+      ship.reload = rand(2.4, 4.2);
+      ship.flashT = 0.18;
+      sfx.cannon();
+      burst(muzzleX, muzzleY, "#f6d6a4", 8, 2.2);
+    };
+
     const burst = (x: number, y: number, color: string, n = 12, speed = 4) => {
       for (let i = 0; i < n; i++) {
         const a = Math.random() * Math.PI * 2;
@@ -270,11 +481,18 @@ export default function PlatformerGame() {
       shakeT = 22;
       sfx.death();
       burst(player.x + player.w / 2, player.y + player.h / 2, "#ff3aa6", 32, 6);
-      if (Math.floor(score) > bestScore) {
-        bestScore = Math.floor(score);
-        localStorage.setItem("neon-cove-best", String(bestScore));
+      const finalScore = Math.floor(score);
+      if (finalScore > bestScore) {
+        bestScore = finalScore;
+        bestScoreRef.current = finalScore;
+        window.localStorage.setItem(BEST_SCORE_KEY, String(bestScore));
       }
-      setHud({ score: Math.floor(score), best: bestScore, state: "dead" });
+      if (qualifiesForLeaderboard(finalScore, leaderboardRef.current)) {
+        openNameEntry(finalScore);
+      } else {
+        closeNameEntry();
+      }
+      setHud({ score: finalScore, best: bestScore, state: "dead" });
     };
 
     // ----- Update -----
@@ -297,7 +515,7 @@ export default function PlatformerGame() {
 
       if (state === "dead") {
         deathT += dt;
-        if ((restartPressed || keys.has("enter")) && deathT > 0.6) {
+        if (!needsNameEntryRef.current && (restartPressed || keys.has("enter")) && deathT > 0.6) {
           restartPressed = false;
           ensureAudio()?.resume();
           sfx.start();
@@ -367,6 +585,8 @@ export default function PlatformerGame() {
         }
       }
 
+      const prevPlayerBottom = player.y + player.h;
+
       // Gravity
       player.vy = Math.min(player.vy + GRAVITY, MAX_FALL);
 
@@ -409,9 +629,7 @@ export default function PlatformerGame() {
         if (e.x > e.maxX) { e.x = e.maxX; e.vx *= -1; }
 
         if (aabb(player, e)) {
-          const playerBottom = player.y + player.h;
-          // Stomp condition: falling + player bottom is above enemy mid
-          if (player.vy > 1 && playerBottom < e.y + e.h * 0.55) {
+          if (isStompHit(e, prevPlayerBottom)) {
             e.alive = false;
             e.squashT = 0;
             stompCombo++;
@@ -431,6 +649,74 @@ export default function PlatformerGame() {
         }
       }
       enemies = enemies.filter((e) => e.squashT < 0.6 && e.x > camX - 200);
+
+      // Ships + cannonballs
+      for (const ship of ships) {
+        ship.flashT = Math.max(0, ship.flashT - dt);
+        ship.reload -= dt;
+        const shipInRange = ship.x > camX - 140 && ship.x < camX + VIEW_W + 140;
+        const playerAhead = player.x > 260 && Math.abs(player.x - ship.x) < 520;
+        if (shipInRange && playerAhead && ship.reload <= 0) {
+          fireShip(ship);
+        }
+      }
+
+      for (const ball of cannonballs) {
+        if (!ball.live) continue;
+        const prevY = ball.y;
+        ball.x += ball.vx;
+        ball.y += ball.vy;
+        ball.vy += CANNONBALL_GRAVITY;
+        ball.trailT += dt;
+
+        if (ball.trailT > 0.04) {
+          ball.trailT = 0;
+          particles.push({
+            x: ball.x,
+            y: ball.y,
+            vx: rand(-0.4, 0.4),
+            vy: rand(-0.5, -0.1),
+            life: 0,
+            maxLife: rand(10, 18),
+            color: "rgba(255,244,227,0.55)",
+            size: rand(1.5, 2.5),
+          });
+        }
+
+        if (circleHitsRect(ball.x, ball.y, ball.r + 1, player)) {
+          burst(ball.x, ball.y, "#f3d7a6", 18, 3.4);
+          shakeT = 10;
+          die();
+          return;
+        }
+
+        let hitPlatform = false;
+        for (const p of platforms) {
+          if (circleHitsRect(ball.x, ball.y, ball.r, p) && prevY + ball.r <= p.y + 6) {
+            hitPlatform = true;
+            break;
+          }
+        }
+
+        if (hitPlatform) {
+          ball.live = false;
+          burst(ball.x, ball.y, "#e8c999", 12, 2.6);
+          continue;
+        }
+
+        if (ball.y + ball.r >= GROUND_Y + 4) {
+          ball.live = false;
+          burst(ball.x, GROUND_Y + 4, "#9bd0d2", 12, 2.4);
+        }
+      }
+      cannonballs = cannonballs.filter(
+        (ball) =>
+          ball.live &&
+          ball.x > camX - 260 &&
+          ball.x < camX + VIEW_W + 260 &&
+          ball.y < VIEW_H + 120,
+      );
+      ships = ships.filter((ship) => ship.x + ship.w > camX - 280);
 
       // Coins
       for (const c of coins) {
@@ -503,53 +789,68 @@ export default function PlatformerGame() {
 
     // ----- Drawing -----
     const drawBackground = () => {
-      // sky gradient
+      const horizon = GROUND_Y - 6;
+
       const sky = ctx.createLinearGradient(0, 0, 0, VIEW_H);
-      sky.addColorStop(0, "#0a0524");
-      sky.addColorStop(0.55, "#1a0a44");
-      sky.addColorStop(1, "#3a0d5c");
+      sky.addColorStop(0, "#0d2131");
+      sky.addColorStop(0.45, "#29495f");
+      sky.addColorStop(0.72, "#a16b3a");
+      sky.addColorStop(1, "#d4a06b");
       ctx.fillStyle = sky;
       ctx.fillRect(0, 0, VIEW_W, VIEW_H);
 
-      // distant stars
+      const moonX = VIEW_W * 0.74;
+      const moonY = 130;
+      const moonR = 58;
+      const moonGlow = ctx.createRadialGradient(moonX, moonY, 8, moonX, moonY, moonR * 2.1);
+      moonGlow.addColorStop(0, "rgba(255,244,212,0.95)");
+      moonGlow.addColorStop(0.28, "rgba(255,225,165,0.72)");
+      moonGlow.addColorStop(1, "rgba(255,225,165,0)");
+      ctx.fillStyle = moonGlow;
+      ctx.beginPath();
+      ctx.arc(moonX, moonY, moonR * 2.1, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = "#fff1cf";
+      ctx.beginPath();
+      ctx.arc(moonX, moonY, moonR, 0, Math.PI * 2);
+      ctx.fill();
+
       ctx.save();
-      for (let i = 0; i < 60; i++) {
-        const sx = ((i * 137.5 - camX * 0.05) % VIEW_W + VIEW_W) % VIEW_W;
-        const sy = (i * 53) % 220;
-        const tw = 0.5 + 0.5 * Math.sin(timeT * 2 + i);
-        ctx.globalAlpha = 0.3 + tw * 0.5;
-        ctx.fillStyle = "#fff";
+      for (let i = 0; i < 36; i++) {
+        const sx = ((i * 157.5 - camX * 0.03) % VIEW_W + VIEW_W) % VIEW_W;
+        const sy = 24 + (i * 41) % 170;
+        const tw = 0.45 + 0.55 * Math.sin(timeT * 1.8 + i);
+        ctx.globalAlpha = 0.2 + tw * 0.4;
+        ctx.fillStyle = "#fff7dd";
         ctx.fillRect(sx, sy, 1.5, 1.5);
       }
       ctx.restore();
 
-      // neon sun
-      const sunX = VIEW_W * 0.7;
-      const sunY = 250;
-      const sunR = 90;
-      const grd = ctx.createRadialGradient(sunX, sunY, 5, sunX, sunY, sunR);
-      grd.addColorStop(0, "#fff5b8");
-      grd.addColorStop(0.4, "#ff7ad6");
-      grd.addColorStop(1, "rgba(255,80,180,0)");
-      ctx.fillStyle = grd;
-      ctx.beginPath();
-      ctx.arc(sunX, sunY, sunR, 0, Math.PI * 2);
-      ctx.fill();
-
-      // sun stripes (synthwave)
       ctx.save();
-      ctx.globalCompositeOperation = "destination-out";
-      for (let i = 0; i < 6; i++) {
-        const y = sunY + 10 + i * 12;
-        ctx.fillRect(sunX - sunR, y, sunR * 2, 4 + i);
-      }
+      ctx.fillStyle = "rgba(25, 39, 41, 0.96)";
+      ctx.beginPath();
+      ctx.moveTo(0, horizon + 6);
+      ctx.lineTo(90, horizon - 10);
+      ctx.lineTo(160, horizon + 2);
+      ctx.lineTo(245, horizon - 32);
+      ctx.lineTo(320, horizon + 8);
+      ctx.lineTo(430, horizon - 14);
+      ctx.lineTo(560, horizon + 6);
+      ctx.lineTo(660, horizon - 26);
+      ctx.lineTo(760, horizon + 4);
+      ctx.lineTo(860, horizon - 18);
+      ctx.lineTo(VIEW_W, horizon + 10);
+      ctx.lineTo(VIEW_W, horizon + 60);
+      ctx.lineTo(0, horizon + 60);
+      ctx.closePath();
+      ctx.fill();
       ctx.restore();
 
-      // distant ship silhouette
       const shipX = ((-camX * 0.1) % (VIEW_W + 200) + VIEW_W + 200) % (VIEW_W + 200) - 100;
       ctx.save();
-      ctx.fillStyle = "rgba(20,5,40,0.9)";
-      ctx.translate(shipX, 360 + Math.sin(timeT * 0.7) * 4);
+      ctx.fillStyle = "rgba(38, 21, 9, 0.95)";
+      ctx.translate(shipX, horizon - 18 + Math.sin(timeT * 0.7) * 3);
       ctx.beginPath();
       ctx.moveTo(-40, 0); ctx.lineTo(40, 0); ctx.lineTo(30, 12); ctx.lineTo(-30, 12); ctx.closePath();
       ctx.fill();
@@ -562,50 +863,69 @@ export default function PlatformerGame() {
       ctx.fill();
       ctx.restore();
 
-      // synthwave grid floor (water)
-      ctx.save();
-      ctx.strokeStyle = "rgba(0, 240, 255, 0.55)";
-      ctx.lineWidth = 1;
-      // horizon line
-      const horizon = GROUND_Y;
-      ctx.shadowColor = "#00f0ff";
-      ctx.shadowBlur = 8;
-      ctx.beginPath();
-      ctx.moveTo(0, horizon);
-      ctx.lineTo(VIEW_W, horizon);
-      ctx.stroke();
-      ctx.shadowBlur = 0;
+      const sea = ctx.createLinearGradient(0, horizon, 0, VIEW_H);
+      sea.addColorStop(0, "#214d5b");
+      sea.addColorStop(0.45, "#173a46");
+      sea.addColorStop(1, "#091c25");
+      ctx.fillStyle = sea;
+      ctx.fillRect(0, horizon, VIEW_W, VIEW_H - horizon);
 
-      // perspective lines
-      const vanishX = VIEW_W / 2 - (camX * 0.3) % 80;
-      for (let i = -16; i <= 16; i++) {
-        const lx = vanishX + i * 80;
-        ctx.beginPath();
-        ctx.moveTo(lx, horizon);
-        ctx.lineTo(VIEW_W / 2 + (lx - VIEW_W / 2) * 6, VIEW_H + 60);
-        ctx.globalAlpha = 0.35;
-        ctx.stroke();
-      }
-      // horizontal grid lines (receding)
-      ctx.globalAlpha = 1;
-      for (let i = 1; i < 14; i++) {
-        const t = i / 14;
-        const y = horizon + Math.pow(t, 1.6) * (VIEW_H - horizon + 40);
-        ctx.globalAlpha = 0.55 * (1 - t * 0.6);
-        ctx.beginPath();
-        ctx.moveTo(0, y);
-        ctx.lineTo(VIEW_W, y);
-        ctx.stroke();
-      }
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(moonX - 38, horizon + 10);
+      ctx.lineTo(moonX + 38, horizon + 10);
+      ctx.lineTo(moonX + 92, VIEW_H);
+      ctx.lineTo(moonX - 92, VIEW_H);
+      ctx.closePath();
+      const reflection = ctx.createLinearGradient(0, horizon, 0, VIEW_H);
+      reflection.addColorStop(0, "rgba(255,230,172,0.24)");
+      reflection.addColorStop(1, "rgba(255,230,172,0)");
+      ctx.fillStyle = reflection;
+      ctx.fill();
       ctx.restore();
 
-      // soft water reflection of sun
+      for (let layer = 0; layer < 4; layer++) {
+        const layerTop = horizon + 22 + layer * 28;
+        const amp = 5 + layer * 2.6;
+        const speed = 0.8 + layer * 0.22;
+        const freq = 0.022 - layer * 0.002;
+        ctx.beginPath();
+        ctx.moveTo(0, VIEW_H);
+        ctx.lineTo(0, layerTop);
+        for (let x = 0; x <= VIEW_W + 20; x += 16) {
+          const waveY =
+            layerTop +
+            Math.sin(x * freq + timeT * speed * 3 + layer * 0.9) * amp +
+            Math.sin(x * (freq * 0.55) - timeT * speed * 1.6) * amp * 0.35;
+          ctx.lineTo(x, waveY);
+        }
+        ctx.lineTo(VIEW_W, VIEW_H);
+        ctx.closePath();
+        ctx.fillStyle = [
+          "rgba(39, 93, 106, 0.28)",
+          "rgba(28, 78, 90, 0.34)",
+          "rgba(20, 60, 70, 0.44)",
+          "rgba(12, 38, 47, 0.7)",
+        ][layer];
+        ctx.fill();
+      }
+
       ctx.save();
-      const refl = ctx.createLinearGradient(0, GROUND_Y, 0, VIEW_H);
-      refl.addColorStop(0, "rgba(255,120,200,0.25)");
-      refl.addColorStop(1, "rgba(255,120,200,0)");
-      ctx.fillStyle = refl;
-      ctx.fillRect(sunX - sunR, GROUND_Y, sunR * 2, VIEW_H - GROUND_Y);
+      ctx.strokeStyle = "rgba(241, 228, 191, 0.36)";
+      ctx.lineWidth = 1.2;
+      for (let band = 0; band < 5; band++) {
+        const lineY = horizon + 16 + band * 20;
+        ctx.beginPath();
+        for (let x = 0; x <= VIEW_W + 12; x += 12) {
+          const y =
+            lineY +
+            Math.sin(x * 0.026 + timeT * (2.2 + band * 0.15) + band) * (2.5 + band * 0.45) +
+            Math.cos(x * 0.011 - timeT * 1.1) * 1.4;
+          if (x === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      }
       ctx.restore();
     };
 
@@ -613,22 +933,20 @@ export default function PlatformerGame() {
       const x = p.x - camX;
       const bob = Math.sin(timeT * 1.2 + p.phase) * 3;
       const y = p.y + bob;
+      const woodHue = 24 + ((p.hue % 80) / 80) * 12;
 
       ctx.save();
-      // glow
-      ctx.shadowColor = `hsl(${p.hue},100%,65%)`;
-      ctx.shadowBlur = 18;
-      // wood plank base
+      ctx.shadowColor = "rgba(20, 10, 2, 0.35)";
+      ctx.shadowBlur = 14;
       const grd = ctx.createLinearGradient(x, y, x, y + p.h);
-      grd.addColorStop(0, `hsl(${p.hue}, 90%, 30%)`);
-      grd.addColorStop(1, `hsl(${p.hue}, 80%, 14%)`);
+      grd.addColorStop(0, `hsl(${woodHue}, 48%, 41%)`);
+      grd.addColorStop(1, `hsl(${woodHue - 2}, 44%, 21%)`);
       ctx.fillStyle = grd;
       roundRect(ctx, x, y, p.w, p.h, 4);
       ctx.fill();
 
-      // top neon edge
-      ctx.shadowBlur = 14;
-      ctx.strokeStyle = `hsl(${p.hue}, 100%, 70%)`;
+      ctx.shadowBlur = 0;
+      ctx.strokeStyle = "rgba(242, 210, 158, 0.8)";
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.moveTo(x + 3, y + 1);
@@ -637,7 +955,7 @@ export default function PlatformerGame() {
 
       // plank lines
       ctx.shadowBlur = 0;
-      ctx.strokeStyle = `hsla(${p.hue},80%,10%,0.7)`;
+      ctx.strokeStyle = "rgba(56, 31, 13, 0.66)";
       ctx.lineWidth = 1;
       for (let i = 1; i < 4; i++) {
         const lx = x + (p.w * i) / 4;
@@ -647,10 +965,18 @@ export default function PlatformerGame() {
         ctx.stroke();
       }
 
-      // bolts
-      ctx.fillStyle = `hsl(${p.hue}, 100%, 80%)`;
-      ctx.shadowColor = `hsl(${p.hue},100%,70%)`;
-      ctx.shadowBlur = 6;
+      ctx.strokeStyle = "rgba(214, 182, 129, 0.9)";
+      ctx.lineWidth = 1.4;
+      for (const offset of [12, p.w - 12]) {
+        ctx.beginPath();
+        ctx.moveTo(x + offset, y + 2);
+        ctx.lineTo(x + offset, y + p.h - 2);
+        ctx.stroke();
+      }
+
+      ctx.fillStyle = "#d7b16d";
+      ctx.shadowColor = "rgba(215, 177, 109, 0.4)";
+      ctx.shadowBlur = 4;
       ctx.beginPath(); ctx.arc(x + 5, y + p.h / 2, 1.6, 0, Math.PI * 2); ctx.fill();
       ctx.beginPath(); ctx.arc(x + p.w - 5, y + p.h / 2, 1.6, 0, Math.PI * 2); ctx.fill();
       ctx.restore();
@@ -708,6 +1034,95 @@ export default function PlatformerGame() {
         ctx.lineTo(lx + swing, y + bob + e.h + 5);
         ctx.stroke();
       }
+      ctx.restore();
+    };
+
+    const drawShip = (ship: Ship) => {
+      const x = ship.x - camX;
+      const bob = Math.sin(timeT * 1.7 + ship.bobPhase) * 4;
+      const y = ship.y + bob;
+      const hullTop = y - ship.h;
+
+      ctx.save();
+
+      ctx.fillStyle = "rgba(11, 32, 40, 0.24)";
+      ctx.beginPath();
+      ctx.ellipse(x, y + 6, ship.w * 0.62, 9, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = "#4a2812";
+      ctx.beginPath();
+      ctx.moveTo(x - ship.w * 0.5, hullTop + ship.h * 0.18);
+      ctx.lineTo(x + ship.w * 0.5, hullTop + ship.h * 0.18);
+      ctx.lineTo(x + ship.w * 0.34, y);
+      ctx.lineTo(x - ship.w * 0.38, y);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.strokeStyle = "#6b3f1d";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(x - ship.w * 0.46, hullTop + ship.h * 0.28);
+      ctx.lineTo(x + ship.w * 0.46, hullTop + ship.h * 0.28);
+      ctx.stroke();
+
+      ctx.fillStyle = "#6d4521";
+      ctx.fillRect(x - 2, hullTop - ship.mastH, 4, ship.mastH + 4);
+
+      ctx.fillStyle = "#efe4c8";
+      ctx.beginPath();
+      ctx.moveTo(x + 4, hullTop - ship.mastH + 8);
+      ctx.lineTo(x + ship.w * 0.26, hullTop - ship.mastH + 24);
+      ctx.lineTo(x + 4, hullTop - ship.mastH + 42);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = "#5c1f14";
+      ctx.beginPath();
+      ctx.moveTo(x + 4, hullTop - ship.mastH + 12);
+      ctx.lineTo(x + ship.w * 0.12, hullTop - ship.mastH + 18);
+      ctx.lineTo(x + 4, hullTop - ship.mastH + 24);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.strokeStyle = "rgba(243, 234, 208, 0.35)";
+      ctx.lineWidth = 1.1;
+      ctx.beginPath();
+      for (let i = 0; i <= 20; i++) {
+        const px = x - ship.w * 0.56 + i * (ship.w * 1.12 / 20);
+        const py = y + 8 + Math.sin(timeT * 3.2 + i * 0.55 + ship.bobPhase) * 2.6;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+
+      if (ship.flashT > 0) {
+        ctx.globalAlpha = Math.min(1, ship.flashT * 5);
+        ctx.fillStyle = "#ffd38d";
+        ctx.beginPath();
+        ctx.arc(x + ship.w * 0.32, hullTop + ship.h * 0.45, 8 + ship.flashT * 24, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.restore();
+    };
+
+    const drawCannonball = (ball: Cannonball) => {
+      const x = ball.x - camX;
+      const y = ball.y;
+
+      ctx.save();
+      ctx.fillStyle = "rgba(255, 240, 208, 0.16)";
+      ctx.beginPath();
+      ctx.arc(x - ball.vx * 1.4, y - ball.vy * 0.4, ball.r * 1.45, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.shadowColor = "rgba(255, 216, 146, 0.24)";
+      ctx.shadowBlur = 8;
+      ctx.fillStyle = "#20150d";
+      ctx.beginPath();
+      ctx.arc(x, y, ball.r, 0, Math.PI * 2);
+      ctx.fill();
       ctx.restore();
     };
 
@@ -844,28 +1259,28 @@ export default function PlatformerGame() {
 
     const drawHUD = () => {
       ctx.save();
-      ctx.font = "bold 24px ui-sans-serif, system-ui, sans-serif";
-      ctx.shadowColor = "#7df9ff";
+      ctx.font = "bold 24px Georgia, Times New Roman, serif";
+      ctx.shadowColor = "rgba(26, 15, 6, 0.55)";
       ctx.shadowBlur = 12;
-      ctx.fillStyle = "#fff";
-      ctx.fillText(`SCORE  ${Math.floor(score)}`, 20, 36);
+      ctx.fillStyle = "#f6e7c4";
+      ctx.fillText(`TREASURE  ${Math.floor(score)}`, 20, 36);
 
-      ctx.font = "bold 14px ui-sans-serif, system-ui, sans-serif";
-      ctx.shadowColor = "#ff3aa6";
-      ctx.fillStyle = "#ffaee0";
-      ctx.fillText(`BEST  ${Math.max(bestScore, Math.floor(score))}`, 20, 56);
+      ctx.font = "bold 14px Georgia, Times New Roman, serif";
+      ctx.shadowColor = "rgba(26, 15, 6, 0.4)";
+      ctx.fillStyle = "#d9bf84";
+      ctx.fillText(`BEST HAUL  ${Math.max(bestScore, Math.floor(score))}`, 20, 56);
 
       // combo indicator
       if (stompCombo > 1 && stompComboT > 0) {
-        ctx.font = `bold ${22 + stompCombo * 2}px ui-sans-serif`;
-        ctx.shadowColor = "#ffe57a";
-        ctx.fillStyle = "#fff";
+        ctx.font = `bold ${22 + stompCombo * 2}px Georgia, Times New Roman, serif`;
+        ctx.shadowColor = "rgba(92, 54, 15, 0.5)";
+        ctx.fillStyle = "#ffe0a8";
         const pulse = 1 + Math.sin(timeT * 14) * 0.05;
         ctx.save();
         ctx.translate(VIEW_W / 2, 80);
         ctx.scale(pulse, pulse);
         ctx.textAlign = "center";
-        ctx.fillText(`x${stompCombo} STOMP!`, 0, 0);
+        ctx.fillText(`x${stompCombo} BROADSIDE!`, 0, 0);
         ctx.restore();
         ctx.textAlign = "start";
       }
@@ -874,38 +1289,37 @@ export default function PlatformerGame() {
 
     const drawTitle = () => {
       ctx.save();
-      // dim
-      ctx.fillStyle = "rgba(7,6,26,0.5)";
+      ctx.fillStyle = "rgba(17, 17, 11, 0.28)";
       ctx.fillRect(0, 0, VIEW_W, VIEW_H);
 
       ctx.textAlign = "center";
-      ctx.shadowColor = "#ff3aa6";
-      ctx.shadowBlur = 30;
-      ctx.fillStyle = "#fff";
-      ctx.font = "bold 76px ui-sans-serif, system-ui, sans-serif";
+      ctx.shadowColor = "rgba(71, 42, 16, 0.45)";
+      ctx.shadowBlur = 26;
+      ctx.fillStyle = "#fff2d0";
+      ctx.font = "bold 74px Georgia, Times New Roman, serif";
       const wob = Math.sin(titleT * 2) * 4;
       ctx.fillText("NEON COVE", VIEW_W / 2, 200 + wob);
 
-      ctx.shadowColor = "#7df9ff";
-      ctx.shadowBlur = 14;
-      ctx.font = "bold 22px ui-sans-serif";
-      ctx.fillStyle = "#9ff7ff";
-      ctx.fillText("a synthwave pirate platformer", VIEW_W / 2, 240 + wob);
-
+      ctx.shadowColor = "rgba(71, 42, 16, 0.28)";
       ctx.shadowBlur = 8;
-      ctx.font = "bold 18px ui-sans-serif";
-      ctx.fillStyle = "#fff";
+      ctx.font = "bold 22px Georgia, Times New Roman, serif";
+      ctx.fillStyle = "#e5c890";
+      ctx.fillText("ride the cove, raid the tide, outrun the deep", VIEW_W / 2, 240 + wob);
+
+      ctx.shadowBlur = 6;
+      ctx.font = "bold 18px Georgia, Times New Roman, serif";
+      ctx.fillStyle = "#f5ead4";
       const blink = Math.floor(titleT * 2) % 2 === 0;
       if (blink) ctx.fillText("PRESS  SPACE  TO  SET  SAIL", VIEW_W / 2, 320);
 
       ctx.shadowBlur = 0;
-      ctx.font = "14px ui-sans-serif";
-      ctx.fillStyle = "rgba(255,255,255,0.7)";
+      ctx.font = "14px Georgia, Times New Roman, serif";
+      ctx.fillStyle = "rgba(255,244,223,0.82)";
       ctx.fillText("←/→ or A/D  to move      SPACE/W/↑  to jump (up to 3 in the air)", VIEW_W / 2, 380);
-      ctx.fillText("STOMP enemies from above • Collect treasure • Don't fall in", VIEW_W / 2, 402);
+      ctx.fillText("Stomp enemies • Dodge cannon fire • Collect treasure • Don't fall in", VIEW_W / 2, 402);
       if (bestScore > 0) {
-        ctx.fillStyle = "#ffaee0";
-        ctx.fillText(`Best score: ${bestScore}`, VIEW_W / 2, 432);
+        ctx.fillStyle = "#d7b16d";
+        ctx.fillText(`Captain's best haul: ${bestScore}`, VIEW_W / 2, 432);
       }
       ctx.restore();
     };
@@ -918,29 +1332,29 @@ export default function PlatformerGame() {
 
       if (deathT > 0.4) {
         ctx.textAlign = "center";
-        ctx.shadowColor = "#ff3aa6";
-        ctx.shadowBlur = 30;
-        ctx.fillStyle = "#fff";
-        ctx.font = "bold 64px ui-sans-serif";
+        ctx.shadowColor = "rgba(71, 42, 16, 0.42)";
+        ctx.shadowBlur = 24;
+        ctx.fillStyle = "#fff1cf";
+        ctx.font = "bold 62px Georgia, Times New Roman, serif";
         ctx.fillText("DAVY JONES GOT YA", VIEW_W / 2, 220);
 
-        ctx.shadowColor = "#7df9ff";
-        ctx.shadowBlur = 12;
-        ctx.font = "bold 28px ui-sans-serif";
-        ctx.fillStyle = "#9ff7ff";
-        ctx.fillText(`SCORE  ${Math.floor(score)}`, VIEW_W / 2, 270);
+        ctx.shadowColor = "rgba(71, 42, 16, 0.24)";
+        ctx.shadowBlur = 10;
+        ctx.font = "bold 28px Georgia, Times New Roman, serif";
+        ctx.fillStyle = "#e9ce96";
+        ctx.fillText(`TREASURE  ${Math.floor(score)}`, VIEW_W / 2, 270);
         if (Math.floor(score) >= bestScore && Math.floor(score) > 0) {
-          ctx.fillStyle = "#ffe57a";
-          ctx.shadowColor = "#ffe57a";
-          ctx.fillText("✦ NEW BEST ✦", VIEW_W / 2, 300);
+          ctx.fillStyle = "#d7b16d";
+          ctx.shadowColor = "rgba(215, 177, 109, 0.28)";
+          ctx.fillText("✦ NEW BEST HAUL ✦", VIEW_W / 2, 300);
         } else {
-          ctx.fillText(`BEST  ${bestScore}`, VIEW_W / 2, 300);
+          ctx.fillText(`BEST HAUL  ${bestScore}`, VIEW_W / 2, 300);
         }
 
         if (deathT > 0.8) {
           const blink = Math.floor(deathT * 2) % 2 === 0;
-          ctx.font = "bold 18px ui-sans-serif";
-          ctx.fillStyle = "#fff";
+          ctx.font = "bold 18px Georgia, Times New Roman, serif";
+          ctx.fillStyle = "#f7ecda";
           if (blink) ctx.fillText("PRESS  SPACE  TO  RESTART", VIEW_W / 2, 360);
         }
       }
@@ -956,6 +1370,11 @@ export default function PlatformerGame() {
 
       drawBackground();
 
+      for (const ship of ships) {
+        if (ship.x + ship.w < camX - 120 || ship.x - ship.w > camX + VIEW_W + 120) continue;
+        drawShip(ship);
+      }
+
       // platforms
       for (const p of platforms) {
         if (p.x + p.w < camX - 50 || p.x > camX + VIEW_W + 50) continue;
@@ -967,6 +1386,9 @@ export default function PlatformerGame() {
 
       // enemies
       for (const e of enemies) drawEnemy(e);
+
+      // cannonballs
+      for (const ball of cannonballs) drawCannonball(ball);
 
       // player
       if (state === "playing" || state === "dead") drawPlayer();
@@ -1026,12 +1448,12 @@ export default function PlatformerGame() {
       className="relative w-full h-full flex items-center justify-center select-none"
       style={{
         background:
-          "radial-gradient(ellipse at center, #1a0a44 0%, #07061a 70%)",
+          "radial-gradient(circle at top, rgba(214,160,94,0.2), transparent 34%), linear-gradient(180deg, #102635 0%, #143346 42%, #08141d 100%)",
       }}
     >
       <canvas
         ref={canvasRef}
-        className="rounded-xl shadow-[0_0_60px_rgba(255,80,200,0.35)]"
+        className="rounded-[24px] border border-[#c49a61]/25 shadow-[0_22px_80px_rgba(10,14,18,0.55)]"
         style={{
           width: "min(100vw, calc(100vh * 16 / 9))",
           height: "min(100vh, calc(100vw * 9 / 16))",
@@ -1039,9 +1461,91 @@ export default function PlatformerGame() {
           maxHeight: "100vh",
           imageRendering: "auto",
           touchAction: "none",
-          background: "#07061a",
+          background: "#0f2431",
         }}
       />
+      <aside className="pointer-events-auto absolute inset-x-3 bottom-3 z-10 rounded-[30px] border border-[#6d4a24]/35 bg-[linear-gradient(180deg,rgba(241,226,187,0.95),rgba(213,183,130,0.93))] p-4 text-[#2f1d0e] shadow-[0_24px_60px_rgba(0,0,0,0.35)] md:inset-x-auto md:right-4 md:top-4 md:bottom-auto md:w-[320px]">
+        <div className="mb-3 flex items-baseline justify-between gap-3">
+          <div>
+            <p className="text-[0.65rem] font-semibold uppercase tracking-[0.35em] text-[#7a4f23]/80">Captain's Ledger</p>
+            <h2 className="text-xl font-black tracking-[0.08em] text-[#2c1708]">Neon Cove</h2>
+          </div>
+          <div className="text-right">
+            <p className="text-[0.65rem] uppercase tracking-[0.28em] text-[#7a4f23]/70">Best Haul</p>
+            <p className="text-2xl font-black text-[#5b2f0f]">{Math.max(bestScoreRef.current, leaderboard[0]?.score ?? 0)}</p>
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-[#7b582d]/20 bg-[rgba(112,74,33,0.08)] px-3 py-2 text-xs uppercase tracking-[0.24em] text-[#6b4319]">
+          Local top {LEADERBOARD_LIMIT} scores on this device
+        </div>
+
+        <div className="mt-3 space-y-2">
+          {leaderboard.length > 0 ? (
+            leaderboard.map((entry, index) => (
+              <div
+                key={entry.id}
+                className="grid grid-cols-[40px_1fr_auto] items-center gap-3 rounded-2xl border border-[#7b582d]/15 bg-[rgba(255,247,232,0.46)] px-3 py-2"
+              >
+                <div className="text-lg font-black text-[#7a4b20]">{String(index + 1).padStart(2, "0")}</div>
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-semibold uppercase tracking-[0.16em] text-[#2f1d0e]">{entry.name}</p>
+                  <p className="text-[0.65rem] uppercase tracking-[0.22em] text-[#7a5d40]">
+                    {new Date(entry.date).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                  </p>
+                </div>
+                <div className="text-right text-lg font-black text-[#5b2f0f]">{entry.score}</div>
+              </div>
+            ))
+          ) : (
+            <div className="rounded-2xl border border-dashed border-[#7b582d]/25 bg-[rgba(255,247,232,0.34)] px-4 py-5 text-sm text-[#5b4226]">
+              No posted runs yet. Finish a round and claim the first spot.
+            </div>
+          )}
+        </div>
+      </aside>
+
+      {needsNameEntry && pendingScore !== null ? (
+        <div className="absolute inset-0 z-20 flex items-center justify-center bg-[#08141d]/70 p-4 backdrop-blur-sm">
+          <form
+            onSubmit={submitLeaderboardEntry}
+            className="w-full max-w-sm rounded-[28px] border border-[#6d4a24]/30 bg-[linear-gradient(180deg,rgba(243,229,194,0.98),rgba(216,187,136,0.97))] p-5 text-[#2f1d0e] shadow-[0_25px_90px_rgba(0,0,0,0.45)]"
+          >
+            <p className="text-[0.68rem] font-semibold uppercase tracking-[0.35em] text-[#7a4f23]/80">New Log Entry</p>
+            <h3 className="mt-2 text-3xl font-black tracking-[0.08em] text-[#2c1708]">Treasure {pendingScore}</h3>
+            <p className="mt-2 text-sm text-[#5c4327]">This run made the ledger. Add a captain name before you restart.</p>
+
+            <label className="mt-4 block text-[0.68rem] font-semibold uppercase tracking-[0.28em] text-[#7a4f23]/80" htmlFor="leaderboard-name">
+              Captain Name
+            </label>
+            <input
+              id="leaderboard-name"
+              ref={nameInputRef}
+              value={playerName}
+              onChange={(event) => setPlayerName(event.target.value)}
+              maxLength={18}
+              placeholder="Deckhand"
+              className="mt-2 w-full rounded-2xl border border-[#7b582d]/25 bg-[rgba(255,248,233,0.74)] px-4 py-3 text-base font-semibold tracking-[0.08em] text-[#2f1d0e] outline-none transition focus:border-[#8d6230] focus:ring-2 focus:ring-[#b98a51]/25"
+            />
+
+            <div className="mt-4 flex gap-3">
+              <button
+                type="submit"
+                className="flex-1 rounded-2xl bg-[#6b3f1d] px-4 py-3 text-sm font-black uppercase tracking-[0.2em] text-[#f6e7c4] transition hover:bg-[#7a4b20]"
+              >
+                Post Score
+              </button>
+              <button
+                type="button"
+                onClick={closeNameEntry}
+                className="rounded-2xl border border-[#7b582d]/25 px-4 py-3 text-sm font-black uppercase tracking-[0.2em] text-[#5a3818] transition hover:bg-[rgba(112,74,33,0.08)]"
+              >
+                Skip
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
     </div>
   );
 }
